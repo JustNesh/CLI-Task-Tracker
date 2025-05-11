@@ -1,31 +1,38 @@
-use std::fmt::write;
-use std::hash::Hash;
-use std::io::{Error, Write};
-use std::ops::Index;
+use std::io::Write;
 use std::path::Path;
-use std::task;
 use serde::{Serialize,Deserialize};
-use std::fs::{File,OpenOptions};
-use serde_json::Result;
+use std::fs::File;
 use std::time::SystemTime;
 use std::collections::HashMap;
-
+use std::fmt::Display;
 use thiserror::Error;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 enum TaskStatus {
     Done,
     InProgress,
     New,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}",self)
+        
+        // match &self{
+        //     TaskStatus::Done => write!(f, "{}", "Done"),
+        //     TaskStatus::InProgress => write!(f, "{}", "In Progress"),
+        //     TaskStatus::New => write!(f, "{}", "New"),
+        // }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct TaskHash{
     hash: HashMap<i32,Task>,
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct Task{
     id: i32,
     description: String,
@@ -49,11 +56,12 @@ enum MenuOptions{
     MarkDone,
     MarkInProgress,
     List,
+    Quit,
 }
 
 enum ListOptions {
     Done,
-    Todo,
+    New,
     InProgress,
     All
 }
@@ -67,12 +75,12 @@ enum ResponseError{
     NoArguments,
     #[error("{0}")]
     CreateFileError(String),
-    #[error("{0}")]
-    JsonParsingError(String),
     #[error("Serde Error: {0}")]
     SerdeError(#[from] serde_json::Error),
     #[error("Rust STD Library Error: {0}")]
     STDError(#[from] std::io::Error),
+    #[error("Parsen Int Error: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError)
 }
 
 fn process_response(res: &String) -> std::result::Result<MenuOptions, ResponseError>{
@@ -87,6 +95,7 @@ fn process_response(res: &String) -> std::result::Result<MenuOptions, ResponseEr
         "markdone" => Some(MenuOptions::MarkDone),
         "markinprogress" => Some(MenuOptions::MarkInProgress),
         "list" => Some(MenuOptions::List),
+        "quit" => Some(MenuOptions::Quit),
         _ => None,
     };
 
@@ -110,14 +119,27 @@ fn process_response(res: &String) -> std::result::Result<MenuOptions, ResponseEr
 fn match_response(res:&str,menu_option: MenuOptions, path: &Path) -> std::result::Result<(), ResponseError> {
     match menu_option{
         MenuOptions::Add => add_task(&res,path),
+        MenuOptions::Delete => delete_task(&res, path),
         MenuOptions::List => list_tasks(&res, path),
+        MenuOptions::Quit => quit_process(),
         _ => add_task(res, path),
     }
 }
 
+fn delete_task(res: &str, path: &Path) -> std::result::Result<(), ResponseError>{
+    let mut task_hash = file_contents_to_task_hash(path)?;
+    let response_vec:Vec<String> = true_input_parse(&res.to_string());
+    let delete_task_id: i32 = response_vec[1].clone().parse()?;
+    task_hash.hash.remove(&delete_task_id);
+    let mut file = create_file(path)?;
+    let json_task = serde_json::to_string(&task_hash)?;
+    file.write_all(json_task.as_bytes())?;
+    Ok(())
+}
+
 fn add_task(res: &str, path: &Path) -> std::result::Result<(),ResponseError> {
     //Create a Task Struct from input
-    let str_vec = parse_user_input(&res.to_owned());
+    let str_vec = true_input_parse(&res.to_owned());
     let task_string = &str_vec[1];    
     if !path.exists(){
         let new_task = Task::new(1, task_string.to_owned(), TaskStatus::New, SystemTime::now(), SystemTime::now());
@@ -151,38 +173,68 @@ fn list_tasks(res: &str, path: &Path) -> std::result::Result<(),ResponseError>{
     let task_hash = file_contents_to_task_hash(path)?;
     //Parsing the User's input and checking to see if the user 
     //wants to see all the tasks or something else
-    let response_vector: Vec<String> = parse_user_input(&res.to_owned());
+    let response_vector: Vec<String> = true_input_parse(&res.to_owned());
     if response_vector.len() == 1 {
-        for (_,task) in task_hash.hash{
-            println!("\nTask ID - {} \nDescription - {}\n",task.id, task.description);
-        }    
+        print_tasks(Some(ListOptions::All), task_hash)?;
         return Ok(())
     }
     let list_option = &response_vector[1];
     let list_option = match list_option.as_str(){
         "done" => Some(ListOptions::Done),
-        "todo" => Some(ListOptions::Todo),
-        "inprogress" => Some(ListOptions::InProgress),
+        "new" => Some(ListOptions::New),
+        "in-progress" => Some(ListOptions::InProgress),
         _ => None,
     };
-
     if list_option.is_none() {return Err(ResponseError::InvalidInput)}
+    print_tasks(list_option, task_hash)?;
     Ok(())
 }
 
-///JUSTIN USE THIS FUNCTION TO USE THE RUST SORT BY VEC METHOD TO SORT THE VECTOR AND THEN PRINT OUT IN ORDER BY ID
-fn task_hash_to_sorted_vec(task_hash: &TaskHash) -> Vec<Task>{
-    let vec:Vec<Task> = vec![];
-    let task_hash_len:i32 = task_hash.hash.len().clone() as i32;
-    for num in 0..=task_hash_len{
-        let result = &task_hash.hash.get_key_value(&num);
-        if let None = result {
-            continue
-        } else {
-            let result =result.unwrap();
+fn print_tasks(list_option: Option<ListOptions>, task_hash: TaskHash) -> std::result::Result<(), ResponseError>{
+    if let Some(ListOptions::All) = list_option {
+        for (_,task) in task_hash.hash{
+            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
         }
-    }
+        return Ok(())
+    } else if let Some(ListOptions::Done) = list_option {
+        let done_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::Done);
+        println!("=== Completed Tasks ===");
+        for (_,task) in done_tasks{
+            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        }
+        return Ok(())
+    } else if let Some(ListOptions::InProgress) = list_option {
+        let in_progress_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::InProgress);
+        println!("=== Tasks In Progress ===");
+        for (_,task) in in_progress_tasks{
+            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        }
+        return Ok(())
+    } else if let Some(ListOptions::New) = list_option {
+        let new_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::New);
+        println!("=== New Tasks ===");
+        for (_,task) in new_tasks{
+            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        }
+        return Ok(())
+    } else {
+        return Err(ResponseError::InvalidInput)
+    };
 }
+
+///JUSTIN USE THIS FUNCTION TO USE THE RUST SORT BY VEC METHOD TO SORT THE VECTOR AND THEN PRINT OUT IN ORDER BY ID
+// fn task_hash_to_sorted_vec(task_hash: &TaskHash) -> Vec<Task>{
+//     let vec:Vec<Task> = vec![];
+//     let task_hash_len:i32 = task_hash.hash.len().clone() as i32;
+//     for num in 0..=task_hash_len{
+//         let result = &task_hash.hash.get_key_value(&num);
+//         if let None = result {
+//             continue
+//         } else {
+//             let result =result.unwrap();
+//         }
+//     }
+// }
 
 
 fn get_user_input() -> std::result::Result<String,ResponseError> {
@@ -199,55 +251,44 @@ fn get_user_input() -> std::result::Result<String,ResponseError> {
     }
 }
 
-fn parse_user_input(ui:&String) -> Vec<String>{
-    let mut is_parenthesis = false;
-    let mut is_beginning_of_word = false;
-    let mut beginning_of_word: i16 = 0_i16;
-    let mut end_of_word: i16 = 0_i16;
-    let mut vector_of_words: Vec<String> = vec![]; 
-    let mut beginning_of_string: bool = true;
-    let mut parenthesis_count = 0;
-    for char in ui.chars() {
-        if char == '"' {
-            is_parenthesis = !is_parenthesis;
-            if parenthesis_count == 1 {
-
-            }
-            parenthesis_count +=1;
-            continue
-        }
-        if is_parenthesis{
-            continue
-        }
-        if char == ' ' && is_beginning_of_word{
-            beginning_of_word = ui.find(char).unwrap() as i16 + 1_i16;
-        } else if char == ' ' && !is_beginning_of_word{
-            end_of_word = ui.find(char).unwrap() as i16;
-            vector_of_words.push(ui[beginning_of_word as usize..end_of_word as usize].to_owned()).to_owned();
-        }
-
-    }
-    let vec: Vec<_> = ui.split(' ').map(|item| item.to_owned()).collect();
-    vec
-}
-
-fn test_parse(string: &String) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut current_word = String::new();
+//Splits the String into a vector while keeping non-empty substrings together as one item.
+fn true_input_parse(string:&String) -> Vec<String> {
+    // initialize variables to use
     let mut in_quotes = false;
+    let mut current = String::new();
+    let mut result: Vec<String> = vec![];
+    // This variable allows us to see one iteration ahead
+    let mut chars_iter = string.chars().peekable();
 
-    for c in string.chars() {
-        if c == '"' {
-            in_quotes = !in_quotes; // Toggle quoted state
-        } else if c == ' ' && !in_quotes {
-            if !current_word.is_empty() {
-                result.push(current_word.clone());
-                current_word.clear();
+    //Loops through the peekable iteration
+    while let Some(char) = chars_iter.next() {
+        //If the next character exists and the current char is NOT a whitespace or a quotation mark
+        if chars_iter.peek().is_none() && char != ' ' && char != '"'{
+            //if the current word isn't empty after removing whitespaces and other "invisible" shit
+            current.push(char);
+            if !current.trim().is_empty(){
+                //Push that shit into the result vector
+                result.push(current.to_owned());
             }
-        } else {
-            current_word.push(c);
+            //Current word is cleared for the next word/substring
+            current.clear();
+        }
+        //Puts us in quotation mode or takes us out of it
+        if char == '"'{
+            in_quotes = !in_quotes;
+        } 
+        //if the char is a whitespace or a quotation mark and if we aren't in quotation mod
+        if (char == ' ' && in_quotes == false) || (char == '"' && in_quotes == false){
+            if !current.is_empty(){
+                result.push(current.clone());
+            }
+            current.clear();
+            //If the character isn't a \ or a quote then push that shit to the current word
+            } else if char != '\\' && char != '"' {
+                current.push(char);
         }
     }
+    //return result
     result
 }
 
@@ -286,24 +327,35 @@ fn create_new_id(task_hash:&TaskHash) -> i32 {
     let new_id:i32 = highest_id + 1;
     new_id
 }
+
+fn quit_process() -> std::result::Result<(),ResponseError>{
+    println!("CLI-Task Manager has been sucessfully closed");
+    std::process::exit(0);
+}
 fn main() {
-
-    // let result = test_parse(&"\" THIS IS A STRINGGG\" 1 2 3".to_owned());
-    // println!("{:?}", result);
-
     let path = Path::new("./tasks.json");
-    while true{
+    let inf_loop =true;
+    while inf_loop {
         let response = get_user_input();
         if let Err(e) = &response {
             println!("Error: {}", e);
             continue;
         } 
         let unwrapped_response = &response.unwrap();
+
+        //test
+        let test = true_input_parse(&unwrapped_response);
+        println!("Test: {:?}", test);
+
         let menu_option_response = process_response(unwrapped_response);
         if let Err(e) = &menu_option_response {
             println!("Error: {}", e);
             continue;
         }
-        match_response(&unwrapped_response,menu_option_response.unwrap(), &path);
+        let result = match_response(&unwrapped_response,menu_option_response.unwrap(), &path);
+        if let Err(e) = &result{
+            println!("Error: {}", e);
+            continue;
+        }
     }
 }
