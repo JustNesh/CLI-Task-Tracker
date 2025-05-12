@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use serde::{Serialize,Deserialize};
 use std::fs::File;
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use thiserror::Error;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq,PartialOrd, Ord)]
 enum TaskStatus {
     Done,
     InProgress,
@@ -32,7 +32,7 @@ struct TaskHash{
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Task{
     id: i32,
     description: String,
@@ -69,6 +69,8 @@ enum ListOptions {
 enum ResponseError{
     #[error("Not a valid option")]
     InvalidInput,
+    #[error("Task not found")]
+    TaskNotFound,
     #[error("{0}")]
     ReadError(String),
     #[error("No Arguments Provided!")]
@@ -92,10 +94,11 @@ fn process_response(res: &String) -> std::result::Result<MenuOptions, ResponseEr
         "add" => Some(MenuOptions::Add),
         "delete" => Some(MenuOptions::Delete),
         "update" => Some(MenuOptions::Update),
-        "markdone" => Some(MenuOptions::MarkDone),
-        "markinprogress" => Some(MenuOptions::MarkInProgress),
+        "mark-done" => Some(MenuOptions::MarkDone),
+        "mark-in-progress" => Some(MenuOptions::MarkInProgress),
         "list" => Some(MenuOptions::List),
         "quit" => Some(MenuOptions::Quit),
+        "q" => Some(MenuOptions::Quit),
         _ => None,
     };
 
@@ -105,25 +108,70 @@ fn process_response(res: &String) -> std::result::Result<MenuOptions, ResponseEr
 
 }
 
-// fn match_response(res:&str,menu_option: MenuOptions, path: &Path) {
-//     match menu_option{
-//         MenuOptions::Add => add_task(res,path),
-//         MenuOptions::Delete => delete_task(),
-//         MenuOptions::List => list_tasks(),
-//         MenuOptions::Update => update_task(),
-//         MenuOptions::MarkInProgress => change_task_status(),
-//         MenuOptions::MarkDone => change_task_status(),
-//     }
-// }
-
 fn match_response(res:&str,menu_option: MenuOptions, path: &Path) -> std::result::Result<(), ResponseError> {
     match menu_option{
         MenuOptions::Add => add_task(&res,path),
         MenuOptions::Delete => delete_task(&res, path),
         MenuOptions::List => list_tasks(&res, path),
         MenuOptions::Quit => quit_process(),
-        _ => add_task(res, path),
+        MenuOptions::Update => update_task_desc(&res, path),
+        MenuOptions::MarkInProgress => mark_task_in_progress(&res,path),
+        MenuOptions::MarkDone => mark_task_done(&res,path),
     }
+}
+
+fn mark_task_done(res: &str, path: &Path) -> std::result::Result<(), ResponseError>{
+    let mut task_hash = file_contents_to_task_hash(&path)?;
+    let response_vec: Vec<String> = true_input_parse(&res.to_string());
+    let update_task_id: i32 = response_vec[1].clone().parse()?;
+    let task = task_hash.hash.get(&update_task_id);
+    
+    if let None = task {
+        return Err(ResponseError::TaskNotFound);
+    }
+
+    let task = task.unwrap();
+    let updated_task = Task::new(task.id,task.description.clone(),TaskStatus::Done,task.created_at,SystemTime::now());
+    let mut file = File::create(path)?;
+    add_task_to_file(&mut file, &mut task_hash, &updated_task)?;
+    println!("Task was updated to done!");
+    Ok(())
+}
+
+fn mark_task_in_progress(res: &str, path: &Path) -> std::result::Result<(), ResponseError>{
+    let mut task_hash = file_contents_to_task_hash(&path)?;
+    let response_vec: Vec<String> = true_input_parse(&res.to_string());
+    let update_task_id: i32 = response_vec[1].clone().parse()?;
+    let task = task_hash.hash.get(&update_task_id);
+    
+    if let None = task {
+        return Err(ResponseError::TaskNotFound);
+    }
+
+    let task = task.unwrap();
+    let updated_task = Task::new(task.id,task.description.clone(),TaskStatus::InProgress,task.created_at,SystemTime::now());
+    let mut file = File::create(path)?;
+    add_task_to_file(&mut file, &mut task_hash, &updated_task)?;
+    println!("Task was updated to in-progress!");
+    Ok(())
+}
+
+fn update_task_desc(res: &str, path: &Path) -> std::result::Result<(), ResponseError> {
+    let mut task_hash = file_contents_to_task_hash(&path)?;
+    let response_vec: Vec<String> = true_input_parse(&res.to_string());
+    let update_task_id: i32 = response_vec[1].clone().parse()?;
+    let new_task_desc: String = response_vec[2].to_owned();
+    let old_task = task_hash.hash.get(&update_task_id);
+    if old_task.is_none(){
+        return Err(ResponseError::TaskNotFound);
+    }
+    let old_task = old_task.unwrap();
+    let new_task = Task::new(update_task_id, new_task_desc.clone(), old_task.status.clone(), old_task.created_at.clone(), SystemTime::now());
+    let mut file = create_file(path)?;
+    let old_task_desc = old_task.description.clone();   
+    add_task_to_file(&mut file, &mut task_hash, &new_task)?;
+    println!("Task was successfully updated from \"{}\" -> \"{}\"!", old_task_desc, new_task_desc);
+    Ok(())
 }
 
 fn delete_task(res: &str, path: &Path) -> std::result::Result<(), ResponseError>{
@@ -134,6 +182,7 @@ fn delete_task(res: &str, path: &Path) -> std::result::Result<(), ResponseError>
     let mut file = create_file(path)?;
     let json_task = serde_json::to_string(&task_hash)?;
     file.write_all(json_task.as_bytes())?;
+    println!("Task was successfully deleted!");
     Ok(())
 }
 
@@ -192,29 +241,33 @@ fn list_tasks(res: &str, path: &Path) -> std::result::Result<(),ResponseError>{
 
 fn print_tasks(list_option: Option<ListOptions>, task_hash: TaskHash) -> std::result::Result<(), ResponseError>{
     if let Some(ListOptions::All) = list_option {
-        for (_,task) in task_hash.hash{
-            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        let sorted_vector = task_hash_to_filtered_vector(&task_hash);
+        for task in sorted_vector{
+            println!("\nTask ID - {} \nDescription - {}\nStatus - {}\n",task.id, task.description, task.status);
         }
         return Ok(())
     } else if let Some(ListOptions::Done) = list_option {
-        let done_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::Done);
-        println!("=== Completed Tasks ===");
-        for (_,task) in done_tasks{
-            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        let done_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::Done).collect();
+        let done_tasks = filtered_vector_to_sorted_vec(done_tasks);
+        println!("\n=== Completed Tasks ===");
+        for task in done_tasks{
+            println!("\nTask ID - {} \nDescription - {}\nStatus - {}\n",task.id, task.description, task.status);
         }
         return Ok(())
     } else if let Some(ListOptions::InProgress) = list_option {
-        let in_progress_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::InProgress);
-        println!("=== Tasks In Progress ===");
-        for (_,task) in in_progress_tasks{
-            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        let in_progress_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::InProgress).collect();
+        let in_progress_tasks = filtered_vector_to_sorted_vec(in_progress_tasks);
+        println!("\n=== Tasks In Progress ===");
+        for task in in_progress_tasks{
+            println!("\nTask ID - {} \nDescription - {}\nStatus - {}\n",task.id, task.description, task.status);
         }
         return Ok(())
     } else if let Some(ListOptions::New) = list_option {
-        let new_tasks  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::New);
-        println!("=== New Tasks ===");
-        for (_,task) in new_tasks{
-            println!("\nTask ID - {} \nDescription - {}\n Status - {}\n",task.id, task.description, task.status);
+        let new_tasks:Vec<(&i32, &Task)>  = task_hash.hash.iter().filter(|(_,task)| task.status == TaskStatus::New).collect();
+        let new_tasks = filtered_vector_to_sorted_vec(new_tasks);
+        println!("\n=== New Tasks ===");
+        for task in new_tasks{
+            println!("\nTask ID - {} \nDescription - {}\nStatus - {}\n",task.id, task.description, task.status);
         }
         return Ok(())
     } else {
@@ -222,24 +275,33 @@ fn print_tasks(list_option: Option<ListOptions>, task_hash: TaskHash) -> std::re
     };
 }
 
-///JUSTIN USE THIS FUNCTION TO USE THE RUST SORT BY VEC METHOD TO SORT THE VECTOR AND THEN PRINT OUT IN ORDER BY ID
-// fn task_hash_to_sorted_vec(task_hash: &TaskHash) -> Vec<Task>{
-//     let vec:Vec<Task> = vec![];
-//     let task_hash_len:i32 = task_hash.hash.len().clone() as i32;
-//     for num in 0..=task_hash_len{
-//         let result = &task_hash.hash.get_key_value(&num);
-//         if let None = result {
-//             continue
-//         } else {
-//             let result =result.unwrap();
-//         }
-//     }
-// }
+fn filtered_vector_to_sorted_vec(filtered_vector: Vec<(&i32,&Task)>) -> Vec<Task> {
+    let cloned_filtered_vector = filtered_vector.clone();
+    let mut vector: Vec<Task> = vec![];
+    for (_,task) in cloned_filtered_vector{
+        vector.push(task.clone())
+    }
+    vector.sort();
+    vector
+}
 
+fn task_hash_to_filtered_vector(task_hash: &TaskHash) -> Vec<Task> {
+    let task_hash = task_hash.clone();
+    let mut vector: Vec<Task> = vec![];
+    for (_,task) in task_hash.hash.into_iter(){
+        vector.push(task.clone())
+    }
+    vector.sort();
+    vector
+}
 
 fn get_user_input() -> std::result::Result<String,ResponseError> {
     use std::io::stdin;
     let mut buffer = String::new();
+    //Making sure that the carrot character is on the same line as the print statement
+    print!("Task Tracker CLI - ");
+    io::stdout().flush().unwrap();
+
     match stdin().read_line(&mut buffer){
         Ok(_) => {
             if buffer.trim().len() == 0{
@@ -342,10 +404,6 @@ fn main() {
             continue;
         } 
         let unwrapped_response = &response.unwrap();
-
-        //test
-        let test = true_input_parse(&unwrapped_response);
-        println!("Test: {:?}", test);
 
         let menu_option_response = process_response(unwrapped_response);
         if let Err(e) = &menu_option_response {
